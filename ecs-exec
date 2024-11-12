@@ -1,0 +1,588 @@
+#!/bin/bash
+set -u
+
+version="0.1.0"
+declare profile=""
+declare cluster=""
+declare service=""
+declare task=""
+declare container=""
+required_aws_version="1.16.12"
+
+
+selectProfile(){
+  if [[ -n $profile ]]; then
+    return
+  fi
+    profileCount=$(aws configure list-profiles | wc -l | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+
+    if [[ $profileCount = 1 ]]; then
+        profile=$(aws configure list-profiles)
+        return
+    fi
+
+    profiles=$(aws configure list-profiles)
+
+    while true; do
+        selected_profile=""
+        echo "Select profile:"
+        index=1
+        for profile_option in $profiles; do
+            echo "$index) $profile_option"
+            ((index++))
+        done
+        ((index--))
+
+        read -p "Enter the option number or part of the profile name: " selection
+
+        if [[ "$selection" =~ ^[0-9]+$ && "$selection" -ge 1 && "$selection" -le "$index" ]]; then
+            selected_profile=$(echo "$profiles" | sed -n "${selection}p")
+            profile=$selected_profile
+            break
+        else
+            matched_profiles=($(echo "$profiles" | grep -i "$selection"))
+
+            if [[ ${#matched_profiles[@]} -eq 0 ]]; then
+                echo "No matching profile found. Please try again."
+                continue
+            elif [[ ${#matched_profiles[@]} -eq 1 ]]; then
+                selected_profile="${matched_profiles[0]}"
+            else
+                while true; do
+                    echo "Multiple matches found. Please choose one:"
+                    index=1
+                    for profile_option in "${matched_profiles[@]}"; do
+                        echo "$index) $profile_option"
+                        ((index++))
+                    done
+
+                    read -p "Enter the option number of the profile you want to select (or '-' to exit): " sub_selection
+                    if [[ "$sub_selection" == "-" ]]; then
+                        echo "Selection canceled."
+                        break
+                    elif [[ "$sub_selection" =~ ^[0-9]+$ && "$sub_selection" -ge 1 && "$sub_selection" -le "${#matched_profiles[@]}" ]]; then
+                        selected_profile=$(echo "${matched_profiles[$sub_selection-1]}")
+                        profile=$selected_profile
+                        break
+                    else
+                        echo "Invalid selection. Please try again."
+                        continue
+                    fi
+                done
+            fi
+        fi
+
+        if [[ -n "$profile" ]]; then
+            break
+        fi
+
+        if [[ -z $selected_profile ]]; then
+            continue
+        fi
+
+        confirm_result=$(confirmSelection "$selected_profile")
+
+        if [[ "$confirm_result" == "true" ]]; then
+            profile=$selected_profile
+            break
+        fi
+    done
+}
+
+params(){
+    echo "$(profileParam) $(regionParam)"
+}
+
+profileParam() {
+    [[ $profile ]] &>/dev/null && echo "--profile $profile"
+}
+
+regionParam() {
+    [[ $region ]] &>/dev/null && echo "--region $region"
+}
+
+
+selectCluster() {
+    cluster_names=$(aws ecs list-clusters $(params) | jq -r ".clusterArns[]" | cut -d '/' -f 2 | sort)
+    while true; do
+        # Fetch cluster ARNs from AWS ECS and extract cluster names
+        selected_cluster=""
+
+        # Display available clusters with numbered options
+        echo "Select cluster:"
+        index=1
+        for cluster_options in $cluster_names; do
+            echo "$index) $cluster_options"
+            ((index++))
+        done
+        ((index--))
+
+        # Prompt the user to choose a cluster by number or name
+        read -p "Enter the option number or part of the cluster name: " selection
+
+        # Check if the selection is a valid number
+        if [[ "$selection" =~ ^[0-9]+$ && "$selection" -ge 1 && "$selection" -le "$index" ]]; then
+            # User selected by number
+            selected_cluster=$(echo "$cluster_names" | sed -n "${selection}p")
+            cluster=$selected_cluster
+            break
+        else
+            # User entered a substring of the cluster name
+            matched_clusters=($(echo "$cluster_names" | grep -i "$selection"))
+
+            if [[ ${#matched_clusters[@]} -eq 0 ]]; then
+                echo "No matching cluster found. Please try again."
+                continue
+            elif [[ ${#matched_clusters[@]} -eq 1 ]]; then
+                selected_cluster="${matched_clusters[0]}"
+            else
+                while true; do
+                  echo "Multiple matches found. Please choose one:"
+                  index=1
+                  for cluster_option in "${matched_clusters[@]}"; do
+                      echo "$index) $cluster_option"
+                      ((index++))
+                  done
+
+                  read -p "Enter the option number of the cluster you want to select (or '-' to exit): " sub_selection
+                  if [[ "$sub_selection" == "-" ]]; then
+                      echo "Selection canceled."
+                      selected_cluster=""
+                      break
+                  elif [[ "$sub_selection" =~ ^[0-9]+$ && "$sub_selection" -ge 1 && "$sub_selection" -le "${#matched_clusters[@]}" ]]; then
+                      selected_cluster=$(echo "${matched_clusters[$sub_selection-1]}")
+                      cluster=$selected_cluster
+                      break
+                  else
+                      echo "Invalid selection. Please try again."
+                      continue
+                  fi
+                done
+            fi
+        fi
+
+        if [[ -n "$cluster" ]]; then
+            break
+        fi
+
+        if [[ -z $selected_cluster ]]; then
+            continue
+        fi
+
+        confirm_result=$(confirmSelection "$selected_cluster")
+
+        if [[ "$confirm_result" == "true" ]]; then
+            cluster=$selected_cluster
+            break
+        fi
+    done
+}
+
+confirmSelection() {
+    local cluster_name="$1"
+    read -p "Do you want to select $cluster_name? (y or n): " confirm
+    if [[ "$confirm" == "y" ]]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
+
+selectService(){
+  service_names=$(aws ecs list-services $(params) --cluster $cluster | jq -r ".serviceArns[]" | cut -d '/' -f 2- | sort)
+  # check if service_names is empty
+  if [ -z "$service_names" ]; then
+    echo "No services found in cluster $cluster"
+    exit
+  fi
+
+  while true; do
+    selected_service=""
+
+    # Display available services with numbered options
+    echo "Select service:"
+    index=1
+    for service_option in $service_names; do
+      # print service started at
+      echo "$index) $service_option"
+      ((index++))
+    done
+
+        ((index--))
+
+    # Prompt the user to choose a service by number or name
+    read -p "Enter the option number or part of the service name: " selection
+
+    # Check if the selection is a valid number
+
+
+    if [[ "$selection" =~ ^[0-9]+$ && "$selection" -ge 1 && "$selection" -le "$index" ]]; then
+      # User selected by number
+      selected_service=$(echo "$service_names" | sed -n "${selection}p")
+      service=$selected_service
+      break
+    else
+      # User entered a substring of the service name
+      matched_services=($(echo "$service_names" | grep -i "$selection"))
+
+      if [[ ${#matched_services[@]} -eq 0 ]]; then
+        echo "No matching service found. Please try again."
+        continue
+      elif [[ ${#matched_services[@]} -eq 1 ]]; then
+        selected_service="${matched_services[0]}"
+      else
+        while true; do
+          echo "Multiple matches found. Please choose one:"
+          index=1
+          for service_option in "${matched_services[@]}"; do
+            echo "$index) $service_option"
+            ((index++))
+          done
+
+          read -p "Enter the option number of the service you want to select (or '-' to exit): " sub_selection
+          if [[ "$sub_selection" == "-" ]]; then
+            echo "Selection canceled."
+            break
+          elif [[ "$sub_selection" =~ ^[0-9]+$ && "$sub_selection" -ge 1 && "$sub_selection" -le "${#matched_services[@]}" ]]; then
+            selected_service=$(echo "${matched_services[$sub_selection-1]}")
+            service=$selected_service
+            break
+          else
+            echo "Invalid selection. Please try again."
+            continue
+          fi
+        done
+      fi
+    fi
+
+    if [[ -n "$service" ]]; then
+      break
+    fi
+
+    if [[ -z $selected_service ]]; then
+      continue
+    fi
+
+    confirm_result=$(confirmSelection "$selected_service")
+
+    if [[ "$confirm_result" == "true" ]]; then
+      service=$selected_service
+      break
+    fi
+  done
+
+}
+
+selectTask(){
+  tasks=$(aws ecs list-tasks $(params) --cluster $cluster --service-name $service --desired-status RUNNING | jq -r '.taskArns[]'| sort )
+  tasks_started_at=$(aws ecs describe-tasks $(params) --cluster $cluster --tasks $tasks | jq -r ".tasks[] | .taskArn + \" \" + .startedAt" | sort -k2)
+
+  if [ -z "$tasks" ]; then
+    echo "No tasks found in service $service"
+    exit
+  fi
+  while true; do
+    selected_task=""
+
+    echo "Select task:"
+
+    index=1
+    for task_option in $tasks; do
+      started_at=$(echo "$tasks_started_at" | grep $task_option | cut -d ' ' -f 2)
+      echo "$index) $task_option (started at $started_at)"
+      ((index++))
+    done
+
+        ((index--))
+
+    # Prompt the user to choose a task by number or name
+    read -p "Enter the option number or part of the task name: " selection
+
+    # Check if the selection is a valid number
+    if [[ "$selection" =~ ^[0-9]+$ && "$selection" -ge 1 && "$selection" -le "$index" ]]; then
+      # User selected by number
+      selected_task=$(echo "$tasks" | sed -n "${selection}p")
+      task=$selected_task
+      break
+    else
+      # User entered a substring of the task name
+      matched_tasks=($(echo "$tasks" | grep -i "$selection"))
+
+      if [[ ${#matched_tasks[@]} -eq 0 ]]; then
+        echo "No matching task found. Please try again."
+        continue
+      elif [[ ${#matched_tasks[@]} -eq 1 ]]; then
+        selected_task="${matched_tasks[0]}"
+      else
+        while true; do
+          echo "Multiple matches found. Please choose one:"
+          index=1
+          for task_option in "${matched_tasks[@]}"; do
+            echo "$index) $task_option"
+            ((index++))
+          done
+
+          read -p "Enter the option number of the task you want to select (or '-' to exit): " sub_selection
+          if [[ "$sub_selection" == "-" ]]; then
+            echo "Selection canceled."
+            break
+          elif [[ "$sub_selection" =~ ^[0-9]+$ && "$sub_selection" -ge 1 && "$sub_selection" -le "${#matched_tasks[@]}" ]]; then
+            selected_task=$(echo "${matched_tasks[$sub_selection-1]}")
+            task=$selected_task
+            break
+          else
+            echo "Invalid selection. Please try again."
+            continue
+          fi
+        done
+      fi
+    fi
+
+    if [[ -n "$task" ]]; then
+      break
+    fi
+
+    if [[ -z $selected_task ]]; then
+      continue
+    fi
+
+    confirm_result=$(confirmSelection "$selected_task")
+
+    if [[ "$confirm_result" == "true" ]]; then
+      task=$selected_task
+      break
+    fi
+  done
+}
+
+selectContainer(){
+  containers=$(aws ecs describe-tasks $(params) --cluster $cluster --tasks $task | jq -r ".tasks[].containers[].name"|sort)
+  if [ -z "$containers" ]; then
+    echo "No containers found in task $task"
+    exit
+  fi
+
+  while true; do
+    selected_container=""
+
+    # Display available containers with numbered options
+    echo "Select container:"
+    index=1
+    for container_option in $containers; do
+      echo "$index) $container_option"
+      ((index++))
+    done
+
+        ((index--))
+
+    # Prompt the user to choose a container by number or name
+    read -p "Enter the option number or part of the container name: " selection
+
+    # Check if the selection is a valid number
+    if [[ "$selection" =~ ^[0-9]+$ && "$selection" -ge 1 && "$selection" -le "$index" ]]; then
+      # User selected by number
+      selected_container=$(echo "$containers" | sed -n "${selection}p")
+      container=$selected_container
+      break
+    else
+      # User entered a substring of the container name
+      matched_containers=($(echo "$containers" | grep -i "$selection"))
+
+      if [[ ${#matched_containers[@]} -eq 0 ]]; then
+        echo "No matching container found. Please try again."
+        continue
+      elif [[ ${#matched_containers[@]} -eq 1 ]]; then
+        selected_container="${matched_containers[0]}"
+      else
+        while true; do
+          echo "Multiple matches found. Please choose one:"
+          index=1
+          for container_option in "${matched_containers[@]}"; do
+            echo "$index) $container_option"
+            ((index++))
+          done
+
+          read -p "Enter the option number of the container you want to select (or '-' to exit): " sub_selection
+          if [[ "$sub_selection" == "-" ]]; then
+            echo "Selection canceled."
+            break
+          elif [[ "$sub_selection" =~ ^[0-9]+$ && "$sub_selection" -ge 1 && "$sub_selection" -le "${#matched_containers[@]}" ]]; then
+            selected_container=$(echo "${matched_containers[$sub_selection-1]}")
+            container=$selected_container
+            break
+          else
+            echo "Invalid selection. Please try again."
+            continue
+          fi
+        done
+      fi
+    fi
+
+    if [[ -n "$container" ]]; then
+      break
+    fi
+
+    if [[ -z $selected_container ]]; then
+      continue
+    fi
+
+    confirm_result=$(confirmSelection "$selected_container")
+
+    if [[ "$confirm_result" == "true" ]]; then
+      container=$selected_container
+      break
+    fi
+  done
+}
+
+colorEcho(){
+    red='\033[0;31m'
+    green='\033[0;32m'
+    yellow='\033[0;33m'
+    reset='\033[0m'
+
+    if echo $@ | egrep -q "prod|production"; then
+        color=$red
+    elif echo $@ | egrep -q "stage"; then
+        color=$yellow
+    else
+        color=$green
+    fi
+
+    echo -e "${color}$@${reset}"
+}
+
+echo_stderr() {
+    echo -e "$@" >&2
+}
+
+die() {
+    echo_stderr "$@"
+    exit 1
+}
+
+compare_versions() {
+    local version1="$1"
+    local version2="$2"
+
+    if [[ $(echo "$version1" | awk -F. '{ printf("%03d%03d%03d\n", $1, $2, $3); }') -ge $(echo "$version2" | awk -F. '{ printf("%03d%03d%03d\n", $1, $2, $3); }') ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+get_aws_cli_version() {
+    aws --version 2>&1 | head -n1 | cut -d' ' -f1 | cut -d'/' -f2
+}
+
+validatePrereq() {
+    command -v jq  &>/dev/null || die "jq not installed on host. Please install jq. See https://stedolan.github.io/jq/download/"
+    command -v session-manager-plugin &>/dev/null || die "session-manager-plugin not installed. See https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+    command -v aws &>/dev/null || die "AWS CLI not found, AWS CLI version 1.16.12 or later must be installed. See https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    # Checks if AWS CLI is outdated or not., v1 of AWS CLI pipes to std error, redirect
+    AWS_CLI_VERSION=$(get_aws_cli_version)
+    echo_stderr "You have AWS CLI v$AWS_CLI_VERSION installed."
+    # Do a best effort check for v1 (so that it's at least 1.10 and up.
+    if ! compare_versions "$AWS_CLI_VERSION" "$required_aws_version"; then
+    die "AWS CLI version 1.16.12 or later must be installed to support ecs-exec, Run 'aws --version' to see what you have. See https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    fi
+}
+
+function print_help() {
+    cat >&2 <<-END
+usage: $0 [-p profile] [-r region] [-c command] [-v version] [-h]
+END
+}
+
+function print_selected() {
+  clear
+    if [[ -n $profile ]]; then
+        colorEcho "Selected profile: $profile"
+    fi
+    if [[ -n $cluster ]]; then
+        colorEcho "Selected cluster: $cluster"
+    fi
+    if [[ -n $service ]]; then
+        colorEcho "Selected service: $service"
+    fi
+    if [[ -n $task ]]; then
+        colorEcho "Selected task: $task"
+    fi
+    if [[ -n $container ]]; then
+        colorEcho "Selected container: $container"
+    fi
+}
+
+function print_version() {
+    echo "Version: $version"
+}
+
+main(){
+    command='/bin/sh'
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                print_help
+                exit
+                ;;
+            -v|--version)
+                print_version
+                exit
+                ;;
+            -r|--region)
+                shift
+                region="${1:?Region must be specified in --region}"
+                shift
+                ;;
+            -p|--profile)
+                shift
+                profile="${1:?Profile must be specified in --profile}"
+                shift
+                ;;
+            -c|--command)
+                shift
+                command="${1:?Command must be specified in --command}"
+                shift
+                ;;
+            *)
+                die "Unknown param $1"
+                ;;
+        esac
+    done
+
+    echo_stderr "Validating pre-requisites...."
+    validatePrereq
+
+    # spaces matter :)
+    if [[ $AWS_CLI_VERSION =~ ^2 ]] ; then
+        selectProfile
+    else echo_stderr "[INFO] AWS CLI is not v2, unable to select profile. --region or --profile must be set."
+    fi
+    print_selected
+
+    selectCluster
+    echo_stderr
+    print_selected
+
+    selectService
+    echo_stderr
+    print_selected
+
+    selectTask
+    echo_stderr
+    print_selected
+
+    selectContainer
+    echo_stderr
+    print_selected
+
+    cmd="aws ecs execute-command $(params) --cluster $cluster --container $container --task $task --interactive --command '$command'"
+    colorEcho $cmd
+
+    $cmd
+}
+
+main $@
